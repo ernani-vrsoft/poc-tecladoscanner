@@ -5,6 +5,9 @@ app/build/
 
 # Flutter / Dart
 app/.dart_tool/
+leitor_dispositivos/.dart_tool/
+leitor_dispositivos/.flutter-plugins-dependencies
+leitor_dispositivos/pubspec.lock
 app/.flutter-plugins-dependencies
 app/.pub-cache/
 app/.pub/
@@ -18,3 +21,6 @@ app/windows/flutter/ephemeral/
 .DS_Store
 *.swp
 *.log
+
+# FVM
+.fvm/

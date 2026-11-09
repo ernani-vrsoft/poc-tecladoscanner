@@ -3,6 +3,8 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  flutter_libserialport
+  leitor_dispositivos
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

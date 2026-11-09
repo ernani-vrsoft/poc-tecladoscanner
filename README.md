@@ -1,17 +1,24 @@
 # Teclado x Scanner
 
-Mostra cada leitura e de onde ela veio: **SCANNER 1**, **SCANNER 2** ou
-**TECLADO** (qualquer aparelho USB que não seja um scanner cadastrado).
-Funciona com scanner USB (que "digita" como teclado) e scanner serial (COMx).
-Só escuta, nunca bloqueia nada.
+Mostra cada leitura e de onde ela veio: **SCANNER**, **TECLADO** (aparelho
+HID não marcado) ou **SERIAL** (porta COM não marcada). Funciona com scanner
+USB HID (que "digita" como teclado) e scanner serial / USB-COM. Só escuta,
+nunca bloqueia nada.
 
-- `agente/` — Go. Escuta os teclados/scanners USB (Windows: Raw Input, Linux:
-  /dev/input) e escreve um JSON por tecla só com a origem:
-  `{"tipo":"tecla","id":"..."}`. Também abre as portas seriais (9600 8N1) e
-  escreve cada leitura completa: `{"tipo":"serial","id":"COM3","texto":"..."}`.
-- `app/` — Flutter. O caractere vem do próprio Flutter (o sistema já converte);
-  cada tecla do app é casada, na ordem, com a tecla informada pelo agente, que
-  diz se veio do TECLADO ou do SCANNER.
+- `leitor_dispositivos/` — plugin Flutter genérico (não sabe o que é scanner):
+  lista os aparelhos de entrada, mostra quais estão recebendo dados e entrega
+  cada leitura com o ID do aparelho de origem.
+  - **Serial**: portas COM (`flutter_libserialport`), 9600 8N1, leitura até
+    CR/LF ou pausa de 150 ms. Abre só as portas pedidas (`escutarSeriais`) ou
+    todas (`escutarTodasSeriais`).
+  - **USB HID no Windows**: plugin C++ com hook `WH_GETMESSAGE` na thread de UI
+    + Raw Input; manda o texto já com o aparelho de origem por EventChannel.
+    `bloquear(ids)` impede que as teclas desses aparelhos cheguem ao resto do app.
+  - **USB HID no Linux**: `/dev/input/eventN` casado com o `HardwareKeyboard`.
+- `app/` — Flutter. Decide quais aparelhos são scanner (`lib/scanners.dart`,
+  salvo em SharedPreferences) e mostra as leituras como SCANNER, TECLADO ou SERIAL.
+- `agente/` — Go. Hoje só empacota o app num executável único (ver abaixo);
+  a captura não passa mais por ele.
 
 ## Gerar o executável único
 
@@ -33,32 +40,24 @@ O build do Windows precisa ser feito no Windows (Flutter + Visual Studio com
 ## Rodar em desenvolvimento
 
 ```bash
-cd agente && go build -o ../app/build/agente .        # Linux
-cd app && TECLADO_AGENTE=$PWD/build/agente flutter run -d linux
+cd app && flutter run -d windows   # ou -d linux
 ```
-
-No Windows: `go build -o ..\app\build\agente.exe .` e
-`$env:TECLADO_AGENTE="$PWD\build\agente.exe"; flutter run -d windows`.
-
-Para ver só o agente no terminal: `go run . --agente`.
 
 ## Como testar
 
-1. Abra o executável.
-2. Clique em **Adicionar scanner** e faça uma leitura no scanner (USB ou
-   serial). A origem dessa leitura vira o Scanner 1. Repita para o Scanner 2
-   (máximo 2). O "x" remove um scanner.
-3. Com a janela do app em foco, digite no teclado ou passe o leitor: cada
-   leitura aparece como SCANNER 1, SCANNER 2 ou TECLADO. Leituras seriais
-   aparecem mesmo com o app sem foco.
-
-Portas seriais: durante o cadastro o agente abre todas (9600 8N1) para
-descobrir de onde veio a leitura; fora dele, só as dos scanners seriais
-cadastrados. Assim não segura a porta de outro equipamento (balança, pinpad).
+1. Abra o app. À esquerda aparecem as portas COM e os aparelhos USB HID.
+2. Scanner serial: ligue **Detectar** (abre todas as portas), faça uma leitura
+   e veja qual porta acende em verde. Marque **Scanner** nela e desligue
+   Detectar (fora disso só as portas marcadas ficam abertas, para não segurar
+   balança ou pinpad).
+3. Scanner USB HID: com o app em foco, faça uma leitura; o aparelho que
+   acender em verde é o scanner. Marque **Scanner** nele.
+4. As leituras aparecem à direita como SCANNER, TECLADO ou SERIAL. A escolha
+   fica salva.
 
 ## Linux
 
-- Permissão, uma vez só por usuário: `sudo usermod -aG input $USER`. Não precisa
-  sair da sessão: o agente ativa o grupo sozinho. Depois disso roda sem sudo.
+- Scanner USB HID: o usuário precisa estar no grupo `input`
+  (`sudo usermod -aG input $USER`, depois sair e entrar na sessão).
 - Scanner serial: o usuário precisa estar no grupo `dialout`
   (`sudo usermod -aG dialout $USER`, depois sair e entrar na sessão).
