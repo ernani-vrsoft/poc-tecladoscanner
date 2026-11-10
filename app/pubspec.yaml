@@ -1,7 +1,7 @@
-name: teclado_scanner
-description: "Mostra o que foi digitado e se veio do teclado ou do scanner."
+name: poc_teclado
+description: "POC: identificar se a tecla veio do teclado ou do scanner."
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.1.0
 
 environment:
   sdk: ^3.12.2
@@ -9,11 +9,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  shared_preferences: ^2.5.6
+  scanner_input:
+    path: ../scanner_input
 
 dev_dependencies:
-  flutter_test:
-    sdk: flutter
   flutter_lints: ^6.0.0
 
 flutter:

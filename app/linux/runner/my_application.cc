@@ -45,11 +45,11 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "Teclado x Scanner");
+    gtk_header_bar_set_title(header_bar, "poc_teclado");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   } else {
-    gtk_window_set_title(window, "Teclado x Scanner");
+    gtk_window_set_title(window, "poc_teclado");
   }
 
   gtk_window_set_default_size(window, 1280, 720);

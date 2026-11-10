@@ -1,5 +1,4 @@
-# Gera o executável único para Windows e Linux.
-# O resultado fica em "Artifacts" na página da execução (aba Actions).
+# Gera o app para Windows e Linux. Baixe em Actions -> execução -> Artifacts.
 name: build
 
 on:
@@ -11,42 +10,34 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: agente/go.mod
-          cache-dependency-path: agente/go.sum
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: 3.44.9
           cache: true
       - name: Build
-        run: powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+        working-directory: app
+        run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
-          name: teclado-scanner-windows
-          path: dist/teclado-scanner.exe
+          name: poc-teclado-windows
+          path: app/build/windows/x64/runner/Release
 
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: agente/go.mod
-          cache-dependency-path: agente/go.sum
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: 3.44.9
           cache: true
       - name: Dependências
-        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev zip
-      - name: Testes
-        run: cd agente && go test ./...
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
       - name: Build
-        run: ./scripts/build-linux.sh
+        working-directory: app
+        run: flutter build linux --release
       - uses: actions/upload-artifact@v4
         with:
-          name: teclado-scanner-linux
-          path: dist/teclado-scanner
+          name: poc-teclado-linux
+          path: app/build/linux/x64/release/bundle

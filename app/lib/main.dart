@@ -1,269 +1,116 @@
-import 'dart:convert';
+import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:scanner_input/scanner_input.dart';
 
-import 'agente.dart';
-
-void main() => runApp(const App());
-
-class App extends StatelessWidget {
-  const App({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Teclado x Scanner',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
-      home: const Tela(),
-    );
-  }
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  final r = ScannerInput.iniciar(arquivoEstado: _arquivoEstado());
+  runApp(App(erroInicio: r == 0 ? null : 'si_iniciar retornou $r'));
 }
 
-const maxScanners = 2;
-const corTeclado = Color(0xFF1E66D0);
-const corSerial = Colors.blueGrey;
-const coresScanner = [Color(0xFFE07B00), Color(0xFF8E24AA)];
+String? _arquivoEstado() {
+  final base = Platform.isWindows
+      ? Platform.environment['APPDATA']
+      : '${Platform.environment['HOME']}/.config';
+  if (base == null) return null;
+  final dir = Directory('$base${Platform.pathSeparator}poc_teclado')..createSync(recursive: true);
+  return '${dir.path}${Platform.pathSeparator}aprendidos.txt';
+}
 
-/// Scanner cadastrado. O ID só serve para reconhecer o aparelho: porta
-/// serial (COM3, /dev/ttyACM0) ou o ID único do aparelho USB.
-class Scanner {
-  final String id;
-  final String nome;
-  final bool serial;
-  Scanner(this.id, this.nome, this.serial);
+class App extends StatelessWidget {
+  const App({super.key, this.erroInicio});
+  final String? erroInicio;
 
-  String get descricao =>
-      serial ? 'Serial $id' : (nome.isEmpty ? 'Scanner USB' : 'USB · $nome');
-
-  Map<String, dynamic> toJson() => {'id': id, 'nome': nome, 'serial': serial};
-  Scanner.fromJson(Map<String, dynamic> j)
-    : id = j['id'] ?? '',
-      nome = j['nome'] ?? '',
-      serial = j['serial'] ?? false;
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    title: 'Teclado x Scanner',
+    debugShowCheckedModeBanner: false,
+    theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+    home: Tela(erroInicio: erroInicio),
+  );
 }
 
 class Leitura {
-  final DateTime hora = DateTime.now();
-  final String id;
-  final String nome;
-  final bool serial;
+  Leitura(this.texto, this.origem, this.teclasScanner, this.teclasTeclado, this.hora);
   final String texto;
-  Leitura(this.id, this.nome, this.serial, this.texto);
-}
-
-/// Tecla informada pelo agente: só de qual aparelho veio.
-class Origem {
-  final DateTime hora = DateTime.now();
-  final String id;
-  final String nome;
-  Origem(this.id, this.nome);
-}
-
-/// Tecla recebida pelo app (já com o caractere, convertido pelo sistema).
-class TeclaApp {
-  final DateTime hora = DateTime.now();
-  final KeyDownEvent evento;
-  TeclaApp(this.evento);
-}
-
-/// Texto sendo digitado agora por um aparelho USB.
-class Digitando {
-  final String id;
-  final String nome;
-  String texto = '';
-  Digitando(this.id, this.nome);
+  final OrigemTecla origem; // origem do Enter, que fecha a leitura
+  final int teclasScanner;
+  final int teclasTeclado;
+  final DateTime hora;
 }
 
 class Tela extends StatefulWidget {
-  const Tela({super.key});
+  const Tela({super.key, this.erroInicio});
+  final String? erroInicio;
 
   @override
   State<Tela> createState() => _TelaState();
 }
 
 class _TelaState extends State<Tela> {
-  final _agente = Agente();
-  SharedPreferences? _prefs;
-
-  final List<Scanner> _scanners = [];
-  bool _identificando = false;
-  String _status = 'Iniciando...';
-  String _aviso = '';
-  bool _conectado = false;
-
-  final List<Origem> _origens = [];
-  final List<TeclaApp> _teclas = [];
-  final Map<String, Digitando> _digitando = {};
-  final List<Leitura> _leituras = [];
+  final _leituras = <Leitura>[];
+  final _buffer = StringBuffer();
+  int _scanner = 0, _teclado = 0;
+  OrigemTecla? _ultima;
+  List<Aparelho> _aparelhos = [];
+  late final Timer _timer;
 
   @override
   void initState() {
     super.initState();
-    HardwareKeyboard.instance.addHandler(_teclaApp);
-    _iniciar();
+    HardwareKeyboard.instance.addHandler(_tecla);
+    _atualizarAparelhos();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _atualizarAparelhos());
   }
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_teclaApp);
-    _agente.parar();
+    HardwareKeyboard.instance.removeHandler(_tecla);
+    _timer.cancel();
     super.dispose();
   }
 
-  Future<void> _iniciar() async {
-    _prefs = await SharedPreferences.getInstance();
-    final salvos = _prefs!.getStringList('scanners') ?? [];
+  void _atualizarAparelhos() => setState(() => _aparelhos = ScannerInput.aparelhos());
+
+  // Só observa: devolve false para a tecla seguir o caminho normal do app.
+  bool _tecla(KeyEvent e) {
+    if (e is KeyUpEvent) return false;
+    final origem = ScannerInput.origemDa(e);
     setState(() {
-      for (final s in salvos) {
-        try {
-          _scanners.add(Scanner.fromJson(jsonDecode(s)));
-        } catch (_) {}
+      _ultima = origem;
+      final enter =
+          e.logicalKey == LogicalKeyboardKey.enter ||
+          e.logicalKey == LogicalKeyboardKey.numpadEnter;
+      if (enter) {
+        if (_buffer.isNotEmpty) {
+          _leituras.insert(
+            0,
+            Leitura(_buffer.toString(), origem, _scanner, _teclado, DateTime.now()),
+          );
+        }
+        _buffer.clear();
+        _scanner = _teclado = 0;
+      } else if (e.character != null &&
+          e.character!.isNotEmpty &&
+          e.character!.codeUnitAt(0) >= 32) {
+        _buffer.write(e.character);
+        origem.ehScanner ? _scanner++ : _teclado++;
+      } else if (e.logicalKey == LogicalKeyboardKey.backspace && _buffer.isNotEmpty) {
+        final s = _buffer.toString();
+        _buffer
+          ..clear()
+          ..write(s.substring(0, s.length - 1));
       }
     });
-
-    _agente.eventos.listen(_receber);
-    _agente.saiu.then((codigo) {
-      if (mounted) {
-        setState(() {
-          _conectado = false;
-          _status = 'O agente parou (código $codigo)';
-        });
-      }
-    });
-    try {
-      await _agente.iniciar();
-      _atualizarPortas();
-    } catch (e) {
-      setState(() => _status = e.toString());
-    }
-  }
-
-  void _salvarScanners() {
-    _prefs?.setStringList(
-      'scanners',
-      _scanners.map((s) => jsonEncode(s.toJson())).toList(),
-    );
-  }
-
-  /// Diz ao agente quais portas seriais abrir: todas durante o cadastro;
-  /// fora dele, só as dos scanners seriais cadastrados.
-  void _atualizarPortas() {
-    _agente.enviar(
-      _identificando
-          ? {'cmd': 'portas', 'todas': true}
-          : {
-              'cmd': 'portas',
-              'lista': [
-                for (final s in _scanners)
-                  if (s.serial) s.id,
-              ],
-            },
-    );
-  }
-
-  void _cadastrar(bool ligar) {
-    setState(() {
-      _identificando = ligar;
-      if (ligar) _aviso = '';
-    });
-    _atualizarPortas();
-  }
-
-  /// Posição do scanner cadastrado (0 ou 1), ou -1 se não for scanner.
-  int _scanner(String id) => _scanners.indexWhere((s) => s.id == id);
-
-  void _receber(EventoAgente e) {
-    setState(() {
-      switch (e.tipo) {
-        case 'pronto':
-          _conectado = true;
-          _status = 'Escutando teclados, scanners USB e portas seriais';
-        case 'erro':
-          _status = e.texto;
-        case 'aviso':
-          _aviso = e.texto;
-        case 'serial':
-          _novaLeitura(Leitura(e.id, e.nome, true, e.texto));
-        case 'tecla':
-          _origens.add(Origem(e.id, e.nome));
-          _parear();
-      }
-    });
-  }
-
-  /// Toda tecla apertada com o app em foco (não consome a tecla).
-  bool _teclaApp(KeyEvent e) {
-    if (e is KeyDownEvent && !e.synthesized) {
-      setState(() {
-        _teclas.add(TeclaApp(e));
-        _parear();
-      });
-    }
     return false;
-  }
-
-  /// O caractere vem do app; a origem vem do agente. Os dois chegam por
-  /// caminhos diferentes, na mesma ordem: a 1ª tecla de um casa com a 1ª do
-  /// outro. Sobras com mais de 1 segundo (ex: tecla com o app sem foco) são
-  /// descartadas.
-  void _parear() {
-    final limite = DateTime.now().subtract(const Duration(seconds: 1));
-    _origens.removeWhere((o) => o.hora.isBefore(limite));
-    _teclas.removeWhere((t) => t.hora.isBefore(limite));
-    while (_origens.isNotEmpty && _teclas.isNotEmpty) {
-      _aplicar(_origens.removeAt(0), _teclas.removeAt(0).evento);
-    }
-  }
-
-  void _aplicar(Origem o, KeyDownEvent e) {
-    final d = _digitando.putIfAbsent(o.id, () => Digitando(o.id, o.nome));
-    final tecla = e.logicalKey;
-    if (tecla == LogicalKeyboardKey.enter ||
-        tecla == LogicalKeyboardKey.numpadEnter) {
-      if (d.texto.isNotEmpty) {
-        _novaLeitura(Leitura(d.id, d.nome, false, d.texto));
-      }
-      _digitando.remove(o.id);
-    } else if (tecla == LogicalKeyboardKey.backspace) {
-      if (d.texto.isNotEmpty) {
-        d.texto = d.texto.characters.skipLast(1).toString();
-      }
-    } else {
-      final c = e.character;
-      if (c != null && c.isNotEmpty && c.codeUnitAt(0) >= 0x20) {
-        d.texto += c;
-      }
-    }
-  }
-
-  /// Leitura completa (Enter no USB, fim de linha na serial). Se está
-  /// aguardando o cadastro, a origem desta leitura vira um scanner.
-  void _novaLeitura(Leitura l) {
-    if (_identificando &&
-        _scanner(l.id) < 0 &&
-        _scanners.length < maxScanners) {
-      _scanners.add(Scanner(l.id, l.nome, l.serial));
-      _salvarScanners();
-      _identificando = false;
-      _atualizarPortas();
-    }
-    _leituras.insert(0, l);
-    if (_leituras.length > 200) _leituras.removeLast();
-  }
-
-  void _remover(int i) {
-    setState(() {
-      _scanners.removeAt(i);
-      _salvarScanners();
-    });
-    _atualizarPortas();
   }
 
   @override
   Widget build(BuildContext context) {
+    final diag = widget.erroInicio ?? ScannerInput.diagnostico();
     return Scaffold(
       appBar: AppBar(title: const Text('Teclado x Scanner')),
       body: Padding(
@@ -271,225 +118,182 @@ class _TelaState extends State<Tela> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _cartaoScanners(),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(
-                  Icons.circle,
-                  size: 10,
-                  color: _conectado ? Colors.green : Colors.red,
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(_status, style: const TextStyle(fontSize: 12)),
-                ),
-              ],
-            ),
-            if (_aviso.isNotEmpty)
-              Text(
-                _aviso,
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
+            if (diag.isNotEmpty)
+              Card(
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: Padding(padding: const EdgeInsets.all(12), child: Text(diag)),
               ),
-            const Divider(height: 24),
-            const Text(
-              'Digitando agora (com o app em foco):',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 4),
-            if (_digitando.isEmpty)
-              const Text('—', style: TextStyle(color: Colors.grey))
-            else
-              ..._digitando.values.map(
-                (d) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Row(
-                    children: [
-                      _etiqueta(d.id, false),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          '${d.texto}▌',
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 16,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            const Divider(height: 24),
-            Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    'Leituras:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-                TextButton(
-                  onPressed: () => setState(_leituras.clear),
-                  child: const Text('Limpar lista'),
-                ),
-              ],
-            ),
+            _Digitando(texto: _buffer.toString(), ultima: _ultima),
+            const SizedBox(height: 12),
             Expanded(
-              child: ListView.builder(
-                itemCount: _leituras.length,
-                itemBuilder: (_, i) => _linhaLeitura(_leituras[i]),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _cartaoScanners() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.qr_code_scanner),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    _identificando
-                        ? 'Faça uma leitura no scanner...'
-                        : 'Scanners (${_scanners.length}/$maxScanners)',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-                if (_identificando)
-                  OutlinedButton(
-                    onPressed: () => _cadastrar(false),
-                    child: const Text('Cancelar'),
-                  )
-                else
-                  FilledButton(
-                    onPressed: _scanners.length >= maxScanners
-                        ? null
-                        : () => _cadastrar(true),
-                    child: const Text('Adicionar scanner'),
-                  ),
-              ],
-            ),
-            if (_identificando)
-              const Padding(
-                padding: EdgeInsets.only(top: 4),
-                child: Text(
-                  'A próxima leitura define o scanner (USB ou serial). '
-                  'Para USB, deixe o app em foco. As portas seriais ficam '
-                  'abertas só durante o cadastro.',
-                  style: TextStyle(fontSize: 12),
-                ),
-              ),
-            if (_scanners.isEmpty && !_identificando)
-              const Padding(
-                padding: EdgeInsets.only(top: 4),
-                child: Text(
-                  'Nenhum scanner cadastrado: tudo aparece como TECLADO.',
-                  style: TextStyle(fontSize: 12),
-                ),
-              ),
-            for (var i = 0; i < _scanners.length; i++)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Row(
-                  children: [
-                    _etiqueta(_scanners[i].id, _scanners[i].serial),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(_scanners[i].descricao)),
-                    IconButton(
-                      tooltip: 'Remover',
-                      icon: const Icon(Icons.close, size: 18),
-                      onPressed: () => _remover(i),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(flex: 3, child: _ListaLeituras(_leituras)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: _ListaAparelhos(
+                      _aparelhos,
+                      onEsquecer: () {
+                        ScannerInput.esquecerAprendidos();
+                        _atualizarAparelhos();
+                      },
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
+            ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _linhaLeitura(Leitura l) {
-    String dois(int n) => n.toString().padLeft(2, '0');
-    final hora =
-        '${dois(l.hora.hour)}:${dois(l.hora.minute)}:${dois(l.hora.second)}';
-    final detalhe = l.serial ? l.id : l.nome;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+Color _cor(TipoOrigem t) => switch (t) {
+  TipoOrigem.scanner => Colors.green.shade700,
+  TipoOrigem.teclado => Colors.blue.shade700,
+  TipoOrigem.desconhecido => Colors.grey,
+};
+
+String _rotulo(TipoOrigem t) => switch (t) {
+  TipoOrigem.scanner => 'SCANNER',
+  TipoOrigem.teclado => 'TECLADO',
+  TipoOrigem.desconhecido => 'DESCONHECIDO',
+};
+
+class _Etiqueta extends StatelessWidget {
+  const _Etiqueta(this.tipo);
+  final TipoOrigem tipo;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+    decoration: BoxDecoration(color: _cor(tipo), borderRadius: BorderRadius.circular(4)),
+    child: Text(
+      _rotulo(tipo),
+      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+    ),
+  );
+}
+
+class _Digitando extends StatelessWidget {
+  const _Digitando({required this.texto, required this.ultima});
+  final String texto;
+  final OrigemTecla? ultima;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(12),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            hora,
-            style: const TextStyle(fontFamily: 'monospace', color: Colors.grey),
-          ),
-          const SizedBox(width: 8),
-          _etiqueta(l.id, l.serial),
-          const SizedBox(width: 8),
+          const Text('Digitando: '),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SelectableText(
-                  l.texto,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 16),
-                ),
-                if (detalhe.isNotEmpty)
-                  Text(
-                    detalhe,
-                    style: const TextStyle(fontSize: 11, color: Colors.grey),
-                  ),
-              ],
+            child: Text(
+              texto.isEmpty ? '(digite no teclado ou passe o leitor; Enter fecha)' : texto,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 16),
             ),
           ),
+          if (ultima != null) ...[
+            const Text('última tecla: '),
+            _Etiqueta(ultima!.tipo),
+            const SizedBox(width: 8),
+            Text(ultima!.aparelho?.nome ?? ''),
+          ],
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 
-  /// SCANNER 1 / SCANNER 2 para os cadastrados; o resto é TECLADO (USB) ou
-  /// SERIAL (porta serial não cadastrada).
-  Widget _etiqueta(String id, bool serial) {
-    final i = _scanner(id);
-    final Color cor;
-    final String texto;
-    if (i >= 0) {
-      cor = coresScanner[i];
-      texto = 'SCANNER ${i + 1}';
-    } else if (serial) {
-      cor = corSerial;
-      texto = 'SERIAL';
-    } else {
-      cor = corTeclado;
-      texto = 'TECLADO';
-    }
-    return Container(
-      width: 80,
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      decoration: BoxDecoration(
-        color: cor,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        texto,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.bold,
+class _ListaLeituras extends StatelessWidget {
+  const _ListaLeituras(this.leituras);
+  final List<Leitura> leituras;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Padding(
+          padding: EdgeInsets.all(12),
+          child: Text(
+            'Leituras (fechadas com Enter)',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
         ),
-      ),
-    );
-  }
+        const Divider(height: 1),
+        Expanded(
+          child: ListView.separated(
+            itemCount: leituras.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (_, i) {
+              final l = leituras[i];
+              final h = l.hora;
+              final hora =
+                  '${h.hour.toString().padLeft(2, '0')}:${h.minute.toString().padLeft(2, '0')}:${h.second.toString().padLeft(2, '0')}';
+              return ListTile(
+                dense: true,
+                leading: _Etiqueta(l.origem.tipo),
+                title: SelectableText(l.texto, style: const TextStyle(fontFamily: 'monospace')),
+                subtitle: Text(
+                  '$hora · ${l.origem.aparelho?.nome ?? 'aparelho desconhecido'}'
+                  ' · teclas: ${l.teclasScanner} scanner / ${l.teclasTeclado} teclado',
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _ListaAparelhos extends StatelessWidget {
+  const _ListaAparelhos(this.aparelhos, {required this.onEsquecer});
+  final List<Aparelho> aparelhos;
+  final VoidCallback onEsquecer;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+          child: Row(
+            children: [
+              const Expanded(
+                child: Text('Aparelhos', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+              TextButton(onPressed: onEsquecer, child: const Text('Esquecer aprendidos')),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: ListView(
+            children: [
+              for (final a in aparelhos)
+                Opacity(
+                  opacity: a.conectado ? 1 : 0.4,
+                  child: ListTile(
+                    dense: true,
+                    leading: _Etiqueta(a.tipo),
+                    title: Text(a.nome.isEmpty ? '(sem nome)' : a.nome),
+                    subtitle: Text(
+                      '${a.vidPid} · ${a.motivo.descricao}'
+                      '${a.conectado ? '' : ' · desconectado'}\n${a.caminho}',
+                    ),
+                    isThreeLine: true,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
 }

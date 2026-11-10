@@ -1,64 +1,43 @@
 # Teclado x Scanner
 
-Mostra cada leitura e de onde ela veio: **SCANNER 1**, **SCANNER 2** ou
-**TECLADO** (qualquer aparelho USB que não seja um scanner cadastrado).
-Funciona com scanner USB (que "digita" como teclado) e scanner serial (COMx).
-Só escuta, nunca bloqueia nada.
+Mostra, para cada tecla, se ela veio de um **TECLADO** ou de um **SCANNER**,
+sem cadastro e sem bloquear nada.
 
-- `agente/` — Go. Escuta os teclados/scanners USB (Windows: Raw Input, Linux:
-  /dev/input) e escreve um JSON por tecla só com a origem:
-  `{"tipo":"tecla","id":"..."}`. Também abre as portas seriais (9600 8N1) e
-  escreve cada leitura completa: `{"tipo":"serial","id":"COM3","texto":"..."}`.
-- `app/` — Flutter. O caractere vem do próprio Flutter (o sistema já converte);
-  cada tecla do app é casada, na ordem, com a tecla informada pelo agente, que
-  diz se veio do TECLADO ou do SCANNER.
+- `scanner_input/` — plugin FFI em C (Linux: evdev; Windows: Raw Input).
+  Escuta todos os aparelhos e classifica cada um sozinho:
+  1. fabricante (VID) de scanner conhecido;
+  2. nome do aparelho ("barcode", "scanner", ...);
+  3. já aprendido antes;
+  4. comportamento: rajada rápida (média ≤ 35 ms) ou de ritmo constante
+     (scanner lento) terminada em Enter — aprende e grava o VID:PID.
+  Teclas injetadas (AnyDesk/RDP, sem aparelho físico) são sempre teclado.
+- `app/` — Flutter. A cada tecla chama `ScannerInput.origemDa(evento)`.
 
-## Gerar o executável único
-
-**Pelo GitHub (recomendado):** a cada push, o GitHub Actions
-(`.github/workflows/build.yml`) gera os dois executáveis. Baixe em
-Actions → execução → Artifacts. Também dá para rodar manualmente em
-Actions → build → Run workflow.
-
-**Na máquina:**
-
-| Sistema | Comando | Resultado |
-|---|---|---|
-| Windows | `powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1` | `dist\teclado-scanner.exe` |
-| Linux | `./scripts/build-linux.sh` | `dist/teclado-scanner` |
-
-O build do Windows precisa ser feito no Windows (Flutter + Visual Studio com
-"Desktop development with C++" + Go).
-
-## Rodar em desenvolvimento
+## Rodar
 
 ```bash
-cd agente && go build -o ../app/build/agente .        # Linux
-cd app && TECLADO_AGENTE=$PWD/build/agente flutter run -d linux
+cd app
+flutter run -d linux      # ou -d windows
 ```
 
-No Windows: `go build -o ..\app\build\agente.exe .` e
-`$env:TECLADO_AGENTE="$PWD\build\agente.exe"; flutter run -d windows`.
-
-Para ver só o agente no terminal: `go run . --agente`.
+Executáveis prontos: GitHub Actions → build → Artifacts.
 
 ## Como testar
 
-1. Abra o executável.
-2. Clique em **Adicionar scanner** e faça uma leitura no scanner (USB ou
-   serial). A origem dessa leitura vira o Scanner 1. Repita para o Scanner 2
-   (máximo 2). O "x" remove um scanner.
-3. Com a janela do app em foco, digite no teclado ou passe o leitor: cada
-   leitura aparece como SCANNER 1, SCANNER 2 ou TECLADO. Leituras seriais
-   aparecem mesmo com o app sem foco.
+1. Abra o app (com a janela em foco).
+2. Digite algo no teclado + Enter: aparece como TECLADO.
+3. Passe o leitor: aparece como SCANNER. O painel "Aparelhos" mostra cada
+   aparelho, como foi classificado e o motivo.
+4. Scanner genérico (sem marca/nome conhecido): a **primeira** leitura
+   ensina a lib. Os caracteres dela aparecem como teclado e o Enter já como
+   scanner ("teclas: 0 scanner / N teclado"). Da segunda em diante, tudo
+   scanner. "Esquecer aprendidos" apaga isso para testar de novo.
 
-Portas seriais: durante o cadastro o agente abre todas (9600 8N1) para
-descobrir de onde veio a leitura; fora dele, só as dos scanners seriais
-cadastrados. Assim não segura a porta de outro equipamento (balança, pinpad).
+Aprendidos ficam em `~/.config/poc_teclado/aprendidos.txt` (Linux) ou
+`%APPDATA%\poc_teclado\aprendidos.txt` (Windows).
 
 ## Linux
 
-- Permissão, uma vez só por usuário: `sudo usermod -aG input $USER`. Não precisa
-  sair da sessão: o agente ativa o grupo sozinho. Depois disso roda sem sudo.
-- Scanner serial: o usuário precisa estar no grupo `dialout`
-  (`sudo usermod -aG dialout $USER`, depois sair e entrar na sessão).
+Permissão de leitura em `/dev/input`, uma vez por usuário:
+`sudo usermod -aG input $USER` e entrar de novo na sessão. Sem isso o app
+mostra o aviso no topo.
