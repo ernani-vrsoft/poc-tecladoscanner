@@ -6,8 +6,10 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <poll.h>
+#include <sys/inotify.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <string.h>
@@ -17,7 +19,6 @@
 #include "si_interno.h"
 
 #define MAX_FDS 64
-#define REVARRER_MS 2000  // procura aparelhos novos/removidos
 #define PAUSA_SERIAL_US 100000  // sem bytes por 100 ms fecha a leitura serial
 
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -98,6 +99,8 @@ static void varrer(void) {
       close(fd);
       continue;
     }
+    int relogio = CLOCK_MONOTONIC;  // mesmo relógio de plat_agora_us
+    ioctl(fd, EVIOCSCLOCKID, &relogio);
     char nome[128] = "";
     struct input_id id = {0};
     ioctl(fd, EVIOCGNAME(sizeof nome), nome);
@@ -154,33 +157,70 @@ static void varrer(void) {
         negados);
 }
 
+static void varrer_medindo(void) {
+  int64_t ini = plat_agora_us();
+  varrer();
+  if (getenv("SI_DEBUG")) {
+    fprintf(stderr, "[si] varredura levou %lld ms\n", (long long)((plat_agora_us() - ini) / 1000));
+    fflush(stderr);
+  }
+}
+
+// O sistema avisa (inotify) quando um aparelho é plugado ou removido, ou
+// quando o udev acerta a permissão dele. Só nesses casos a lib procura de
+// novo: a procura completa leva ~200 ms e, enquanto roda, nenhuma tecla é
+// lida — por isso ela não pode ser periódica.
+static int houve_mudanca(int fd) {
+  char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+  int mudou = 0;
+  ssize_t r;
+  while ((r = read(fd, buf, sizeof buf)) > 0) {
+    for (char* q = buf; q < buf + r;) {
+      struct inotify_event* e = (struct inotify_event*)q;
+      if (e->len && (strncmp(e->name, "event", 5) == 0 || strncmp(e->name, "ttyUSB", 6) == 0 ||
+                     strncmp(e->name, "ttyACM", 6) == 0))
+        mudou = 1;
+      q += sizeof *e + e->len;
+    }
+  }
+  return mudou;
+}
+
 static void* laco(void* arg) {
   (void)arg;
-  int64_t ultima_varredura = 0;
+  int ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+  if (ino >= 0) {
+    inotify_add_watch(ino, "/dev/input", IN_CREATE | IN_DELETE | IN_ATTRIB);
+    inotify_add_watch(ino, "/dev", IN_CREATE | IN_DELETE | IN_ATTRIB);
+  }
+  varrer_medindo();
+  int64_t mudanca_us = 0;  // aguarda o udev terminar antes de procurar
   for (;;) {
-    int64_t agora = plat_agora_us();
-    if (agora - ultima_varredura >= REVARRER_MS * 1000) {
-      varrer();
-      ultima_varredura = agora;
+    if (mudanca_us && plat_agora_us() - mudanca_us >= 300000) {
+      mudanca_us = 0;
+      varrer_medindo();
     }
-    struct pollfd p[MAX_FDS + 1];
+    struct pollfd p[MAX_FDS + 2];
     p[0].fd = g_pipe[0];
     p[0].events = POLLIN;
+    p[1].fd = ino;
+    p[1].events = POLLIN;
     for (int i = 0; i < g_n_fontes; i++) {
-      p[i + 1].fd = g_fontes[i].fd;
-      p[i + 1].events = POLLIN;
+      p[i + 2].fd = g_fontes[i].fd;
+      p[i + 2].events = POLLIN;
     }
-    int n = poll(p, g_n_fontes + 1, 50);
+    int n = poll(p, g_n_fontes + 2, 50);
     if (n < 0 && errno != EINTR) break;
     if (p[0].revents) break;  // pedido de parada
+    if ((p[1].revents & POLLIN) && houve_mudanca(ino)) mudanca_us = plat_agora_us();
     for (int i = g_n_fontes - 1; i >= 0; i--) {
-      if (p[i + 1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+      if (p[i + 2].revents & (POLLERR | POLLHUP | POLLNVAL)) {
         fechar_fonte(i);
         continue;
       }
       if (g_fontes[i].serial) {
         Fonte* f = &g_fontes[i];
-        if (p[i + 1].revents & POLLIN) {
+        if (p[i + 2].revents & POLLIN) {
           char buf[256];
           ssize_t r;
           while ((r = read(f->fd, buf, sizeof buf)) > 0) {
@@ -193,20 +233,22 @@ static void* laco(void* arg) {
         }
         continue;
       }
-      if (!(p[i + 1].revents & POLLIN)) continue;
+      if (!(p[i + 2].revents & POLLIN)) continue;
       struct input_event ev[64];
       ssize_t r;
       while ((r = read(g_fontes[i].fd, ev, sizeof ev)) > 0) {
         for (size_t k = 0; k < (size_t)r / sizeof *ev; k++) {
           // value: 1 = pressionou, 2 = repetição, 0 = soltou
-          if (ev[k].type != EV_KEY || ev[k].value == 0) continue;
+          // value: 1 = pressionou, 0 = soltou, 2 = repetição (ignorada)
+          if (ev[k].type != EV_KEY || ev[k].value == 2) continue;
           int64_t t = (int64_t)ev[k].input_event_sec * 1000000 + ev[k].input_event_usec;
-          nucleo_tecla(g_fontes[i].id, ev[k].code, t);
+          nucleo_tecla(g_fontes[i].id, ev[k].code, ev[k].value, t);
         }
       }
     }
   }
   for (int i = g_n_fontes - 1; i >= 0; i--) fechar_fonte(i);
+  if (ino >= 0) close(ino);
   return NULL;
 }
 

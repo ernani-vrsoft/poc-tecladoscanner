@@ -22,9 +22,10 @@ int64_t plat_agora_us(void);
 int nucleo_aparelho_conectado(const char* chave, const char* nome, int vid,
                               int pid, int sem_aparelho);
 void nucleo_aparelho_desconectado(const char* chave);
-// Tecla pressionada (ou repetida). `codigo` é o código evdev da tecla
-// (no Windows, o scancode é convertido antes). t_us: momento da tecla.
-void nucleo_tecla(int aparelho, int codigo, int64_t t_us);
+// Tecla pressionada (pressionada=1) ou solta (0). `codigo` é o código evdev
+// (no Windows, o scancode é convertido antes). Repetição automática (tecla
+// segurada) é descartada pelo núcleo. t_us: momento da tecla.
+void nucleo_tecla(int aparelho, int codigo, int pressionada, int64_t t_us);
 void nucleo_diagnostico(const char* fmt, ...);
 // Porta serial: aberta (scanner) ou ocupada por outro programa.
 int nucleo_porta(const char* nome, int em_uso);

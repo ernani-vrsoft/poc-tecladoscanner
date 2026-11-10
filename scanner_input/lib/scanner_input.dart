@@ -18,8 +18,9 @@ enum MotivoClassificacao {
   velocidade('rajada rápida + Enter'),
   regularidade('rajada de ritmo constante + Enter'),
   semAparelho('tecla injetada (sem aparelho físico)'),
-  serial('porta serial'),
-  portaEmUso('porta serial aberta por outro programa');
+  serial('porta serial: aguardando a primeira leitura'),
+  portaEmUso('porta serial aberta por outro programa'),
+  serialTeclado('porta serial com ritmo de digitação');
 
   const MotivoClassificacao(this.descricao);
   final String descricao;
@@ -60,10 +61,14 @@ class OrigemTecla {
   bool get ehScanner => tipo == TipoOrigem.scanner;
 }
 
+/// Entrada de porta serial. Scanner: leitura completa. Teclado serial: os
+/// caracteres conforme chegam, com [enter] quando veio CR/LF.
 class LeituraSerial {
-  const LeituraSerial(this.texto, this.aparelho);
+  const LeituraSerial(this.texto, this.aparelho, this.tipo, this.enter);
   final String texto;
   final Aparelho? aparelho;
+  final TipoOrigem tipo;
+  final bool enter;
 }
 
 abstract final class ScannerInput {
@@ -89,16 +94,28 @@ abstract final class ScannerInput {
     _ativo = false;
   }
 
-  /// Origem do [evento]. Chame uma única vez por KeyDownEvent/KeyRepeatEvent:
-  /// a consulta consome o registro da tecla na lib.
+  /// Origem do [evento]. Chame uma única vez por KeyDownEvent: a consulta
+  /// consome o registro da tecla na lib. KeyRepeatEvent reaproveita a origem
+  /// do KeyDown; evento sintetizado pelo Flutter volta como desconhecido.
   static OrigemTecla origemDa(KeyEvent evento) {
-    if (evento is KeyUpEvent) return const OrigemTecla(TipoOrigem.desconhecido, null);
+    // Evento sintetizado: o Flutter cria sozinho (ex.: ao clicar na janela e
+    // ela ganhar foco, ele acerta o estado de Shift/Ctrl/NumLock). Não veio
+    // de nenhum aparelho.
+    if (evento is KeyUpEvent || evento.synthesized) {
+      return const OrigemTecla(TipoOrigem.desconhecido, null);
+    }
+    // Tecla segurada: a repetição tem a mesma origem da tecla pressionada.
+    if (evento is KeyRepeatEvent) {
+      return _ultimaPorTecla[evento.physicalKey] ??
+          const OrigemTecla(TipoOrigem.desconhecido, null);
+    }
     final r = _origem(evento.physicalKey.usbHidUsage & 0xFFFF);
     final tipo = TipoOrigem.values[r.tipo];
-    if (r.aparelho < 0) return OrigemTecla(tipo, null);
-    final ap = aparelhos().where((a) => a.id == r.aparelho).firstOrNull;
-    return OrigemTecla(tipo, ap);
+    final ap = r.aparelho < 0 ? null : aparelhos().where((a) => a.id == r.aparelho).firstOrNull;
+    return _ultimaPorTecla[evento.physicalKey] = OrigemTecla(tipo, ap);
   }
+
+  static final _ultimaPorTecla = <PhysicalKeyboardKey, OrigemTecla>{};
 
   static List<Aparelho> aparelhos() {
     const max = 64;
@@ -123,8 +140,8 @@ abstract final class ScannerInput {
     }
   }
 
-  /// Leituras completas dos scanners seriais desde a última chamada.
-  /// Elas não passam pelo teclado: chame periodicamente (ex.: a cada 50 ms).
+  /// Entradas das portas seriais (scanner ou teclado serial) desde a última
+  /// chamada. Elas não passam pelo teclado do sistema: chame periodicamente (ex.: a cada 50 ms).
   static List<LeituraSerial> leiturasSeriais() {
     final buf = calloc<_SiLeitura>();
     final saida = <LeituraSerial>[];
@@ -134,7 +151,12 @@ abstract final class ScannerInput {
         lista ??= aparelhos();
         final id = buf.ref.aparelho;
         saida.add(
-          LeituraSerial(_texto(buf.ref.texto, 512), lista.where((a) => a.id == id).firstOrNull),
+          LeituraSerial(
+            _texto(buf.ref.texto, 512),
+            lista.where((a) => a.id == id).firstOrNull,
+            TipoOrigem.values[buf.ref.tipo],
+            buf.ref.enter == 1,
+          ),
         );
       }
     } finally {
@@ -181,6 +203,10 @@ final class _SiAparelho extends Struct {
 final class _SiLeitura extends Struct {
   @Int32()
   external int aparelho;
+  @Int32()
+  external int tipo;
+  @Int32()
+  external int enter;
   @Array(512)
   external Array<Char> texto;
 }

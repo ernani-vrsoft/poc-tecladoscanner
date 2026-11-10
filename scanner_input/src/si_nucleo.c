@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "si_interno.h"
@@ -55,8 +56,13 @@ typedef struct {
   int teclas;
   double soma_ms, soma2_ms, max_ms;
   // serial: leitura em andamento
+  int eh_serial;
   char serial[512];
   int n_serial;
+  int64_t t_primeiro, t_ultimo;  // chegada do 1º e do último byte do trecho
+  int teclas_humanas;            // trechos com ritmo de gente
+  unsigned char apertada[128];   // tecla segurada agora (para descartar repetição)
+  int ultimo_cr;
 } Aparelho;
 
 typedef struct {
@@ -74,6 +80,8 @@ static int g_n_aprendidos;
 static char g_arquivo[1024];
 static char g_diag[512];
 static int g_ativo;
+static int g_debug;  // SI_DEBUG=1: registra cada tecla e consulta em stderr
+#define DBG(...) do { if (g_debug) { fprintf(stderr, "[si] " __VA_ARGS__); fflush(stderr); } } while (0)
 static SiLeitura g_leituras[MAX_LEITURAS];
 static int g_n_leituras;
 
@@ -318,12 +326,27 @@ void nucleo_aparelho_desconectado(const char* chave) {
   plat_destravar();
 }
 
-void nucleo_tecla(int aparelho, int codigo, int64_t t_us) {
+void nucleo_tecla(int aparelho, int codigo, int pressionada, int64_t t_us) {
   uint32_t hid = evdev_para_hid(codigo);
+  DBG("tecla: aparelho=%d evdev=%d hid=0x%02x %s lido=%lld kernel=%lld\n", aparelho, codigo,
+      hid, pressionada ? "DOWN" : "up", (long long)(plat_agora_us() / 1000),
+      (long long)(t_us / 1000));
   if (!hid) return;
   plat_travar();
-  if (aparelho >= 0 && aparelho < g_n_aparelhos)
-    registrar_na_rajada(&g_aparelhos[aparelho], hid, t_us);
+  if (aparelho >= 0 && aparelho < g_n_aparelhos) {
+    Aparelho* a = &g_aparelhos[aparelho];
+    int ja_apertada = a->apertada[codigo];
+    a->apertada[codigo] = (unsigned char)(pressionada != 0);
+    // Soltou, ou repetição de tecla segurada (o app consulta a 1ª e reaproveita).
+    if (!pressionada || ja_apertada) {
+      plat_destravar();
+      return;
+    }
+    registrar_na_rajada(a, hid, t_us);
+  } else if (!pressionada) {
+    plat_destravar();
+    return;
+  }
   if (g_n_fila == MAX_FILA) {  // cheia: descarta a mais antiga
     memmove(g_fila, g_fila + 1, sizeof(Tecla) * (MAX_FILA - 1));
     g_n_fila--;
@@ -341,37 +364,88 @@ int nucleo_porta(const char* nome, int em_uso) {
   plat_travar();
   if (id >= 0) {
     Aparelho* a = &g_aparelhos[id];
-    a->info.tipo = em_uso ? SI_DESCONHECIDO : SI_SCANNER;
-    a->info.motivo = em_uso ? SI_MOTIVO_PORTA_EM_USO : SI_MOTIVO_SERIAL;
+    a->eh_serial = 1;
     a->n_serial = 0;
+    a->teclas_humanas = 0;
+    a->ultimo_cr = 0;
+    if (em_uso) {
+      a->info.tipo = SI_DESCONHECIDO;
+      a->info.motivo = SI_MOTIVO_PORTA_EM_USO;
+    } else if (foi_aprendido(&a->info)) {
+      a->info.tipo = SI_SCANNER;
+      a->info.motivo = SI_MOTIVO_APRENDIDO;
+    } else {  // ainda não se sabe: decide pela primeira leitura
+      a->info.tipo = SI_DESCONHECIDO;
+      a->info.motivo = SI_MOTIVO_SERIAL;
+    }
   }
   plat_destravar();
   return id;
 }
 
-static void fechar_leitura_serial(Aparelho* a) {
-  if (a->n_serial == 0) return;
+static void emitir(Aparelho* a, int tipo, const char* texto, int n, int enter) {
   if (g_n_leituras == MAX_LEITURAS) {
     memmove(g_leituras, g_leituras + 1, sizeof(SiLeitura) * (MAX_LEITURAS - 1));
     g_n_leituras--;
   }
   SiLeitura* l = &g_leituras[g_n_leituras++];
   l->aparelho = a->info.id;
-  memcpy(l->texto, a->serial, a->n_serial);
-  l->texto[a->n_serial] = 0;
+  l->tipo = tipo;
+  l->enter = enter;
+  memcpy(l->texto, texto, n);
+  l->texto[n] = 0;
+}
+
+// Fecha o trecho acumulado (por CR/LF ou por pausa) e decide o que ele é.
+static void fechar_trecho_serial(Aparelho* a, int enter) {
+  int n = a->n_serial;
   a->n_serial = 0;
+  if (n == 0) {
+    if (enter && a->info.tipo != SI_SCANNER) emitir(a, SI_TECLADO, "", 0, 1);
+    return;
+  }
+  if (a->info.tipo == SI_SCANNER) {
+    emitir(a, SI_SCANNER, a->serial, n, 1);
+    return;
+  }
+  // Ainda desconhecida: rajada rápida = scanner; senão é gente digitando.
+  double media_ms = n > 1 ? (double)(a->t_ultimo - a->t_primeiro) / 1000.0 / (n - 1) : 1e9;
+  if (n >= RAJADA_MIN_TECLAS && media_ms <= RAPIDO_MEDIA_MS) {
+    aprender(a, SI_MOTIVO_VELOCIDADE);
+    emitir(a, SI_SCANNER, a->serial, n, 1);
+    return;
+  }
+  emitir(a, SI_TECLADO, a->serial, n, enter);
+  if (++a->teclas_humanas >= 3) {  // digitação de pessoa repetida: é teclado
+    a->info.tipo = SI_TECLADO;
+    a->info.motivo = SI_MOTIVO_SERIAL_TECLADO;
+  }
 }
 
 void nucleo_bytes_serial(int aparelho, const char* bytes, int n) {
   if (aparelho < 0) return;
+  int64_t agora = plat_agora_us();
   plat_travar();
   if (aparelho < g_n_aparelhos) {
     Aparelho* a = &g_aparelhos[aparelho];
     for (int i = 0; i < n; i++) {
       unsigned char c = (unsigned char)bytes[i];
-      if (c == '\r' || c == '\n') {
-        fechar_leitura_serial(a);
+      int fim_linha = c == '\r' || c == '\n';
+      if (fim_linha && c == '\n' && a->ultimo_cr) {  // CR+LF conta como um Enter
+        a->ultimo_cr = 0;
+        continue;
+      }
+      a->ultimo_cr = c == '\r';
+      if (a->info.tipo == SI_TECLADO) {  // teclado serial: cada tecla na hora
+        if (fim_linha) emitir(a, SI_TECLADO, "", 0, 1);
+        else if (c >= 32) emitir(a, SI_TECLADO, (const char*)&c, 1, 0);
+        continue;
+      }
+      if (fim_linha) {
+        fechar_trecho_serial(a, 1);
       } else if (c >= 32 && a->n_serial < (int)sizeof a->serial - 1) {
+        if (a->n_serial == 0) a->t_primeiro = agora;
+        a->t_ultimo = agora;
         a->serial[a->n_serial++] = (char)c;  // ignora STX/ETX e outros controles
       }
     }
@@ -382,7 +456,7 @@ void nucleo_bytes_serial(int aparelho, const char* bytes, int n) {
 void nucleo_pausa_serial(int aparelho) {
   if (aparelho < 0) return;
   plat_travar();
-  if (aparelho < g_n_aparelhos) fechar_leitura_serial(&g_aparelhos[aparelho]);
+  if (aparelho < g_n_aparelhos) fechar_trecho_serial(&g_aparelhos[aparelho], 0);
   plat_destravar();
 }
 
@@ -401,6 +475,7 @@ void nucleo_diagnostico(const char* fmt, ...) {
 SI_EXPORT int32_t si_iniciar(const char* arquivo_estado) {
   if (g_ativo) return 0;
   snprintf(g_arquivo, sizeof g_arquivo, "%s", arquivo_estado ? arquivo_estado : "");
+  g_debug = getenv("SI_DEBUG") != NULL;
   carregar_aprendidos();
   g_n_aparelhos = 0;
   g_n_fila = 0;
@@ -444,10 +519,21 @@ SI_EXPORT SiOrigem si_origem_da_tecla(uint32_t hid_usage) {
       r.aparelho = ap;
       r.tipo = (ap >= 0 && ap < g_n_aparelhos) ? g_aparelhos[ap].info.tipo
                                                : SI_TECLADO;
+      DBG("consulta hid=0x%02x -> aparelho=%d tipo=%d (esperou %lld us)\n", hid, ap, r.tipo,
+          (long long)(agora - inicio));
       break;
     }
     // A tecla pode chegar ao app antes de a lib vê-la: espera um pouco.
-    if (agora - inicio >= ESPERA_MAX_MS * 1000) break;
+    if (agora - inicio >= ESPERA_MAX_MS * 1000) {
+      if (g_debug) {
+        DBG("consulta hid=0x%02x NAO ACHOU (inicio=%lld fim=%lld); fila (%d):", hid,
+            (long long)(inicio / 1000), (long long)(agora / 1000), g_n_fila);
+        for (int i = 0; i < g_n_fila; i++)
+          fprintf(stderr, " 0x%02x/ap%d", g_fila[i].hid, g_fila[i].aparelho);
+        fprintf(stderr, "\n");
+      }
+      break;
+    }
     plat_aguardar(5);
   }
   plat_destravar();
@@ -483,8 +569,10 @@ SI_EXPORT void si_esquecer_aprendidos(void) {
     int m = g_aparelhos[i].info.motivo;
     if (m == SI_MOTIVO_APRENDIDO || m == SI_MOTIVO_VELOCIDADE ||
         m == SI_MOTIVO_REGULARIDADE) {
-      g_aparelhos[i].info.tipo = SI_TECLADO;
-      g_aparelhos[i].info.motivo = SI_MOTIVO_NENHUM;
+      g_aparelhos[i].info.tipo = g_aparelhos[i].eh_serial ? SI_DESCONHECIDO : SI_TECLADO;
+      g_aparelhos[i].info.motivo =
+          g_aparelhos[i].eh_serial ? SI_MOTIVO_SERIAL : SI_MOTIVO_NENHUM;
+      g_aparelhos[i].teclas_humanas = 0;
     }
   }
   plat_destravar();

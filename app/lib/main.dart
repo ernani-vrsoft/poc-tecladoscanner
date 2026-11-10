@@ -50,6 +50,8 @@ class Leitura {
   final bool serial;
 }
 
+final _debug = Platform.environment.containsKey('SI_DEBUG');
+
 class Tela extends StatefulWidget {
   const Tela({super.key, this.erroInicio});
   final String? erroInicio;
@@ -76,25 +78,35 @@ class _TelaState extends State<Tela> {
     _timerSerial = Timer.periodic(const Duration(milliseconds: 50), (_) => _lerSerial());
   }
 
-  // Scanner serial não gera tecla: a leitura chega pronta da lib.
+  // Porta serial não gera tecla no sistema: a entrada chega pela lib.
   void _lerSerial() {
     final novas = ScannerInput.leiturasSeriais();
     if (novas.isEmpty) return;
     setState(() {
       for (final l in novas) {
-        _leituras.insert(
-          0,
-          Leitura(
-            l.texto,
-            OrigemTecla(TipoOrigem.scanner, l.aparelho),
-            0,
-            0,
-            DateTime.now(),
-            serial: true,
-          ),
-        );
+        final origem = OrigemTecla(l.tipo, l.aparelho);
+        _ultima = origem;
+        if (l.tipo == TipoOrigem.scanner) {
+          _leituras.insert(0, Leitura(l.texto, origem, 0, 0, DateTime.now(), serial: true));
+          continue;
+        }
+        // Teclado serial: igual a teclado comum, caractere a caractere.
+        _buffer.write(l.texto);
+        _teclado += l.texto.length;
+        if (l.enter) _fecharLeitura(origem, serial: true);
       }
     });
+  }
+
+  void _fecharLeitura(OrigemTecla origem, {bool serial = false}) {
+    if (_buffer.isNotEmpty) {
+      _leituras.insert(
+        0,
+        Leitura(_buffer.toString(), origem, _scanner, _teclado, DateTime.now(), serial: serial),
+      );
+    }
+    _buffer.clear();
+    _scanner = _teclado = 0;
   }
 
   @override
@@ -109,22 +121,24 @@ class _TelaState extends State<Tela> {
 
   // Só observa: devolve false para a tecla seguir o caminho normal do app.
   bool _tecla(KeyEvent e) {
-    if (e is KeyUpEvent) return false;
+    if (_debug && e is! KeyUpEvent) {
+      debugPrint(
+        '[app] ${e.runtimeType} fisica=0x${e.physicalKey.usbHidUsage.toRadixString(16)} '
+        'logica=${e.logicalKey.keyLabel} char=${e.character == null ? null : '"${e.character}"'} '
+        'sintetizado=${e.synthesized}',
+      );
+    }
+    // Sintetizado = criado pelo próprio Flutter (ex.: ao ganhar foco no clique).
+    if (e is KeyUpEvent || e.synthesized) return false;
     final origem = ScannerInput.origemDa(e);
+    if (_debug) debugPrint('[app]   -> ${origem.tipo.name} ${origem.aparelho?.nome ?? ''}');
     setState(() {
       _ultima = origem;
       final enter =
           e.logicalKey == LogicalKeyboardKey.enter ||
           e.logicalKey == LogicalKeyboardKey.numpadEnter;
       if (enter) {
-        if (_buffer.isNotEmpty) {
-          _leituras.insert(
-            0,
-            Leitura(_buffer.toString(), origem, _scanner, _teclado, DateTime.now()),
-          );
-        }
-        _buffer.clear();
-        _scanner = _teclado = 0;
+        _fecharLeitura(origem);
       } else if (e.character != null &&
           e.character!.isNotEmpty &&
           e.character!.codeUnitAt(0) >= 32) {
@@ -272,7 +286,7 @@ class _ListaLeituras extends StatelessWidget {
                 title: SelectableText(l.texto, style: const TextStyle(fontFamily: 'monospace')),
                 subtitle: Text(
                   '$hora · ${l.origem.aparelho?.nome ?? 'aparelho desconhecido'}'
-                  ' · ${l.serial ? 'leitura serial' : 'teclas: ${l.teclasScanner} scanner / ${l.teclasTeclado} teclado'}',
+                  ' · ${l.serial ? (l.origem.ehScanner ? 'scanner serial' : 'teclado serial') : 'teclas: ${l.teclasScanner} scanner / ${l.teclasTeclado} teclado'}',
                 ),
               );
             },

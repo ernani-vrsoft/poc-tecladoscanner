@@ -129,9 +129,11 @@ static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       RAWINPUT* ri = (RAWINPUT*)buf;
       if (ri->header.dwType == RIM_TYPEKEYBOARD) {
         RAWKEYBOARD* k = &ri->data.keyboard;
-        if (!(k->Flags & RI_KEY_BREAK) && k->MakeCode != 0) {
+        if (k->MakeCode != 0) {
           int codigo = si_scancode_para_evdev(k->MakeCode, (k->Flags & RI_KEY_E0) != 0);
-          if (codigo) nucleo_tecla(registrar(ri->header.hDevice), codigo, plat_agora_us());
+          if (codigo)
+            nucleo_tecla(registrar(ri->header.hDevice), codigo, !(k->Flags & RI_KEY_BREAK),
+                         plat_agora_us());
         }
       }
     }
