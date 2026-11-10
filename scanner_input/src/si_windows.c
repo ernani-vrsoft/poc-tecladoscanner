@@ -177,6 +177,128 @@ static DWORD WINAPI laco(LPVOID arg) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Portas seriais (COMx): 9600 8N1. Uma thread procura portas a cada 2 s e
+// cada porta aberta ganha uma thread de leitura.
+// ---------------------------------------------------------------------------
+#define MAX_PORTAS 32
+typedef struct {
+  char nome[32];      // "COM3"
+  int estado;         // 0 = livre, 1 = aberta, 2 = em uso por outro programa
+  int id;
+  HANDLE h;
+  HANDLE thread;
+} Porta;
+static Porta g_portas[MAX_PORTAS];
+static int g_n_portas;
+static volatile LONG g_parando;
+static HANDLE g_thread_serial;
+
+static DWORD WINAPI ler_porta(LPVOID arg) {
+  Porta* p = (Porta*)arg;
+  char buf[256];
+  int pendente = 0;
+  while (!g_parando) {
+    DWORD lidos = 0;
+    if (!ReadFile(p->h, buf, sizeof buf, &lidos, NULL)) break;  // porta sumiu
+    if (lidos > 0) {
+      nucleo_bytes_serial(p->id, buf, (int)lidos);
+      pendente = 1;
+    } else if (pendente) {  // 100 ms sem nada: fecha a leitura sem terminador
+      nucleo_pausa_serial(p->id);
+      pendente = 0;
+    }
+  }
+  return 0;
+}
+
+static HANDLE abrir_porta(const char* nome, DWORD* erro) {
+  char caminho[48];
+  snprintf(caminho, sizeof caminho, "\\\\.\\%s", nome);
+  HANDLE h = CreateFileA(caminho, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+  if (h == INVALID_HANDLE_VALUE) {
+    *erro = GetLastError();
+    return NULL;
+  }
+  DCB dcb = {sizeof dcb};
+  GetCommState(h, &dcb);
+  dcb.BaudRate = CBR_9600;
+  dcb.ByteSize = 8;
+  dcb.Parity = NOPARITY;
+  dcb.StopBits = ONESTOPBIT;
+  dcb.fBinary = TRUE;
+  dcb.fDtrControl = DTR_CONTROL_ENABLE;  // alguns scanners só enviam com DTR/RTS
+  dcb.fRtsControl = RTS_CONTROL_ENABLE;
+  SetCommState(h, &dcb);
+  // Volta assim que chegar algo, ou depois de 100 ms sem nada.
+  COMMTIMEOUTS t = {MAXDWORD, MAXDWORD, 100, 0, 0};
+  SetCommTimeouts(h, &t);
+  return h;
+}
+
+static void varrer_portas(void) {
+  HKEY k;
+  if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DEVICEMAP\\SERIALCOMM", 0, KEY_READ, &k) !=
+      ERROR_SUCCESS)
+    return;
+  for (DWORD i = 0;; i++) {
+    char valor[256], dado[32];
+    DWORD tv = sizeof valor, td = sizeof dado, tipo;
+    if (RegEnumValueA(k, i, valor, &tv, NULL, &tipo, (BYTE*)dado, &td) != ERROR_SUCCESS) break;
+    if (tipo != REG_SZ) continue;
+    dado[sizeof dado - 1] = 0;
+
+    Porta* p = NULL;
+    for (int j = 0; j < g_n_portas; j++)
+      if (strcmp(g_portas[j].nome, dado) == 0) p = &g_portas[j];
+    if (!p) {
+      if (g_n_portas == MAX_PORTAS) continue;
+      p = &g_portas[g_n_portas++];
+      memset(p, 0, sizeof *p);
+      snprintf(p->nome, sizeof p->nome, "%s", dado);
+    }
+    if (p->estado == 1) {
+      if (WaitForSingleObject(p->thread, 0) != WAIT_OBJECT_0) continue;  // lendo
+      CloseHandle(p->thread);  // a thread saiu: porta removida
+      CloseHandle(p->h);
+      p->estado = 0;
+      nucleo_aparelho_desconectado(p->nome);
+    }
+    DWORD erro = 0;
+    HANDLE h = abrir_porta(p->nome, &erro);
+    if (h) {
+      p->h = h;
+      p->id = nucleo_porta(p->nome, 0);
+      p->estado = 1;
+      p->thread = CreateThread(NULL, 0, ler_porta, p, 0, NULL);
+    } else if (erro == ERROR_ACCESS_DENIED && p->estado != 2) {
+      p->estado = 2;
+      p->id = nucleo_porta(p->nome, 1);
+      nucleo_diagnostico(
+          "%s está aberta por outro programa (provavelmente o que digita o código no "
+          "Bloco de Notas). Feche esse programa para a lib ler a porta.",
+          p->nome);
+    }
+  }
+  RegCloseKey(k);
+}
+
+static DWORD WINAPI laco_serial(LPVOID arg) {
+  (void)arg;
+  while (!g_parando) {
+    varrer_portas();
+    for (int i = 0; i < 20 && !g_parando; i++) Sleep(100);
+  }
+  for (int i = 0; i < g_n_portas; i++)
+    if (g_portas[i].estado == 1) {
+      WaitForSingleObject(g_portas[i].thread, 1000);
+      CloseHandle(g_portas[i].thread);
+      CloseHandle(g_portas[i].h);
+    }
+  g_n_portas = 0;
+  return 0;
+}
+
 int plat_iniciar(void) {
   static int inicializado = 0;
   if (!inicializado) {
@@ -192,10 +314,16 @@ int plat_iniciar(void) {
   if (!g_thread) return -1;
   WaitForSingleObject(g_pronto, INFINITE);
   CloseHandle(g_pronto);
+  g_parando = 0;
+  g_n_portas = 0;
+  g_thread_serial = CreateThread(NULL, 0, laco_serial, NULL, 0, NULL);
   return g_resultado;
 }
 
 void plat_parar(void) {
+  InterlockedExchange(&g_parando, 1);
+  WaitForSingleObject(g_thread_serial, 5000);
+  CloseHandle(g_thread_serial);
   PostThreadMessageW(g_thread_id, WM_QUIT, 0, 0);
   WaitForSingleObject(g_thread, 5000);
   CloseHandle(g_thread);

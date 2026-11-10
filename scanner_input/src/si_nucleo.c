@@ -24,6 +24,7 @@
 #define MAX_APARELHOS 64
 #define MAX_FILA 512
 #define MAX_APRENDIDOS 64
+#define MAX_LEITURAS 64
 
 // Fabricantes de scanner (USB VID).
 static const struct { int vid; const char* nome; } FABRICANTES[] = {
@@ -53,6 +54,9 @@ typedef struct {
   int64_t ultima_us;
   int teclas;
   double soma_ms, soma2_ms, max_ms;
+  // serial: leitura em andamento
+  char serial[512];
+  int n_serial;
 } Aparelho;
 
 typedef struct {
@@ -70,6 +74,8 @@ static int g_n_aprendidos;
 static char g_arquivo[1024];
 static char g_diag[512];
 static int g_ativo;
+static SiLeitura g_leituras[MAX_LEITURAS];
+static int g_n_leituras;
 
 // ---------------------------------------------------------------------------
 // Tabela evdev -> USB HID usage (página 0x07)
@@ -330,6 +336,56 @@ void nucleo_tecla(int aparelho, int codigo, int64_t t_us) {
   plat_destravar();
 }
 
+int nucleo_porta(const char* nome, int em_uso) {
+  int id = nucleo_aparelho_conectado(nome, nome, 0, 0, 0);
+  plat_travar();
+  if (id >= 0) {
+    Aparelho* a = &g_aparelhos[id];
+    a->info.tipo = em_uso ? SI_DESCONHECIDO : SI_SCANNER;
+    a->info.motivo = em_uso ? SI_MOTIVO_PORTA_EM_USO : SI_MOTIVO_SERIAL;
+    a->n_serial = 0;
+  }
+  plat_destravar();
+  return id;
+}
+
+static void fechar_leitura_serial(Aparelho* a) {
+  if (a->n_serial == 0) return;
+  if (g_n_leituras == MAX_LEITURAS) {
+    memmove(g_leituras, g_leituras + 1, sizeof(SiLeitura) * (MAX_LEITURAS - 1));
+    g_n_leituras--;
+  }
+  SiLeitura* l = &g_leituras[g_n_leituras++];
+  l->aparelho = a->info.id;
+  memcpy(l->texto, a->serial, a->n_serial);
+  l->texto[a->n_serial] = 0;
+  a->n_serial = 0;
+}
+
+void nucleo_bytes_serial(int aparelho, const char* bytes, int n) {
+  if (aparelho < 0) return;
+  plat_travar();
+  if (aparelho < g_n_aparelhos) {
+    Aparelho* a = &g_aparelhos[aparelho];
+    for (int i = 0; i < n; i++) {
+      unsigned char c = (unsigned char)bytes[i];
+      if (c == '\r' || c == '\n') {
+        fechar_leitura_serial(a);
+      } else if (c >= 32 && a->n_serial < (int)sizeof a->serial - 1) {
+        a->serial[a->n_serial++] = (char)c;  // ignora STX/ETX e outros controles
+      }
+    }
+  }
+  plat_destravar();
+}
+
+void nucleo_pausa_serial(int aparelho) {
+  if (aparelho < 0) return;
+  plat_travar();
+  if (aparelho < g_n_aparelhos) fechar_leitura_serial(&g_aparelhos[aparelho]);
+  plat_destravar();
+}
+
 void nucleo_diagnostico(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -348,6 +404,7 @@ SI_EXPORT int32_t si_iniciar(const char* arquivo_estado) {
   carregar_aprendidos();
   g_n_aparelhos = 0;
   g_n_fila = 0;
+  g_n_leituras = 0;
   g_diag[0] = 0;
   int r = plat_iniciar();
   if (r == 0) g_ativo = 1;
@@ -404,6 +461,18 @@ SI_EXPORT int32_t si_aparelhos(SiAparelho* saida, int32_t max) {
     saida[n++] = g_aparelhos[i].info;
   plat_destravar();
   return n;
+}
+
+SI_EXPORT int32_t si_proxima_leitura(SiLeitura* saida) {
+  plat_travar();
+  int tem = g_n_leituras > 0;
+  if (tem) {
+    *saida = g_leituras[0];
+    memmove(g_leituras, g_leituras + 1, sizeof(SiLeitura) * (g_n_leituras - 1));
+    g_n_leituras--;
+  }
+  plat_destravar();
+  return tem;
 }
 
 SI_EXPORT void si_esquecer_aprendidos(void) {

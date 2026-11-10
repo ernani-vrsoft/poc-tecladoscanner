@@ -26,6 +26,11 @@ void nucleo_aparelho_desconectado(const char* chave);
 // (no Windows, o scancode é convertido antes). t_us: momento da tecla.
 void nucleo_tecla(int aparelho, int codigo, int64_t t_us);
 void nucleo_diagnostico(const char* fmt, ...);
+// Porta serial: aberta (scanner) ou ocupada por outro programa.
+int nucleo_porta(const char* nome, int em_uso);
+// Bytes lidos da porta; o núcleo junta até CR/LF ou até `fim_por_pausa`.
+void nucleo_bytes_serial(int aparelho, const char* bytes, int n);
+void nucleo_pausa_serial(int aparelho);  // nada chegou por um tempo
 
 // Converte scancode set 1 (Windows, com flag E0) para código evdev.
 int si_scancode_para_evdev(int scancode, int e0);

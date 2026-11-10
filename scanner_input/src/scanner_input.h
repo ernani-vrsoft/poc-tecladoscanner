@@ -37,6 +37,8 @@ extern "C" {
 #define SI_MOTIVO_VELOCIDADE 4   // rajada rápida terminada em Enter
 #define SI_MOTIVO_REGULARIDADE 5 // rajada de ritmo constante terminada em Enter
 #define SI_MOTIVO_SEM_APARELHO 6 // tecla injetada (AnyDesk/RDP): sempre teclado
+#define SI_MOTIVO_SERIAL 7       // porta serial (COMx, ttyUSB, ttyACM)
+#define SI_MOTIVO_PORTA_EM_USO 8 // porta serial aberta por outro programa
 
 typedef struct {
   int32_t id;          // identificador interno do aparelho
@@ -48,6 +50,12 @@ typedef struct {
   char nome[128];      // nome informado pelo sistema
   char caminho[256];   // /dev/input/eventX ou \\?\HID#...
 } SiAparelho;
+
+// Leitura completa de um scanner serial (não passa pelo teclado).
+typedef struct {
+  int32_t aparelho;    // id do aparelho (a porta)
+  char texto[512];     // UTF-8, sem o terminador (CR/LF)
+} SiLeitura;
 
 typedef struct {
   int32_t tipo;        // SI_DESCONHECIDO / SI_TECLADO / SI_SCANNER
@@ -66,6 +74,9 @@ SI_EXPORT SiOrigem si_origem_da_tecla(uint32_t hid_usage);
 
 // Copia até `max` aparelhos para `saida`. Retorna quantos copiou.
 SI_EXPORT int32_t si_aparelhos(SiAparelho* saida, int32_t max);
+
+// Retira a próxima leitura serial da fila. Retorna 1 se havia, 0 se não.
+SI_EXPORT int32_t si_proxima_leitura(SiLeitura* saida);
 
 // Esquece os scanners aprendidos por comportamento.
 SI_EXPORT void si_esquecer_aprendidos(void);

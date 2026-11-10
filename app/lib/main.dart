@@ -34,12 +34,20 @@ class App extends StatelessWidget {
 }
 
 class Leitura {
-  Leitura(this.texto, this.origem, this.teclasScanner, this.teclasTeclado, this.hora);
+  Leitura(
+    this.texto,
+    this.origem,
+    this.teclasScanner,
+    this.teclasTeclado,
+    this.hora, {
+    this.serial = false,
+  });
   final String texto;
   final OrigemTecla origem; // origem do Enter, que fecha a leitura
   final int teclasScanner;
   final int teclasTeclado;
   final DateTime hora;
+  final bool serial;
 }
 
 class Tela extends StatefulWidget {
@@ -57,6 +65,7 @@ class _TelaState extends State<Tela> {
   OrigemTecla? _ultima;
   List<Aparelho> _aparelhos = [];
   late final Timer _timer;
+  late final Timer _timerSerial;
 
   @override
   void initState() {
@@ -64,12 +73,35 @@ class _TelaState extends State<Tela> {
     HardwareKeyboard.instance.addHandler(_tecla);
     _atualizarAparelhos();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _atualizarAparelhos());
+    _timerSerial = Timer.periodic(const Duration(milliseconds: 50), (_) => _lerSerial());
+  }
+
+  // Scanner serial não gera tecla: a leitura chega pronta da lib.
+  void _lerSerial() {
+    final novas = ScannerInput.leiturasSeriais();
+    if (novas.isEmpty) return;
+    setState(() {
+      for (final l in novas) {
+        _leituras.insert(
+          0,
+          Leitura(
+            l.texto,
+            OrigemTecla(TipoOrigem.scanner, l.aparelho),
+            0,
+            0,
+            DateTime.now(),
+            serial: true,
+          ),
+        );
+      }
+    });
   }
 
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_tecla);
     _timer.cancel();
+    _timerSerial.cancel();
     super.dispose();
   }
 
@@ -240,7 +272,7 @@ class _ListaLeituras extends StatelessWidget {
                 title: SelectableText(l.texto, style: const TextStyle(fontFamily: 'monospace')),
                 subtitle: Text(
                   '$hora · ${l.origem.aparelho?.nome ?? 'aparelho desconhecido'}'
-                  ' · teclas: ${l.teclasScanner} scanner / ${l.teclasTeclado} teclado',
+                  ' · ${l.serial ? 'leitura serial' : 'teclas: ${l.teclasScanner} scanner / ${l.teclasTeclado} teclado'}',
                 ),
               );
             },

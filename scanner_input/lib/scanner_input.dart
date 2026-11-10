@@ -17,7 +17,9 @@ enum MotivoClassificacao {
   aprendido('aprendido antes'),
   velocidade('rajada rápida + Enter'),
   regularidade('rajada de ritmo constante + Enter'),
-  semAparelho('tecla injetada (AnyDesk/RDP)');
+  semAparelho('tecla injetada (sem aparelho físico)'),
+  serial('porta serial'),
+  portaEmUso('porta serial aberta por outro programa');
 
   const MotivoClassificacao(this.descricao);
   final String descricao;
@@ -56,6 +58,12 @@ class OrigemTecla {
   final Aparelho? aparelho;
 
   bool get ehScanner => tipo == TipoOrigem.scanner;
+}
+
+class LeituraSerial {
+  const LeituraSerial(this.texto, this.aparelho);
+  final String texto;
+  final Aparelho? aparelho;
 }
 
 abstract final class ScannerInput {
@@ -115,6 +123,26 @@ abstract final class ScannerInput {
     }
   }
 
+  /// Leituras completas dos scanners seriais desde a última chamada.
+  /// Elas não passam pelo teclado: chame periodicamente (ex.: a cada 50 ms).
+  static List<LeituraSerial> leiturasSeriais() {
+    final buf = calloc<_SiLeitura>();
+    final saida = <LeituraSerial>[];
+    try {
+      List<Aparelho>? lista;
+      while (_proximaLeitura(buf) == 1) {
+        lista ??= aparelhos();
+        final id = buf.ref.aparelho;
+        saida.add(
+          LeituraSerial(_texto(buf.ref.texto, 512), lista.where((a) => a.id == id).firstOrNull),
+        );
+      }
+    } finally {
+      calloc.free(buf);
+    }
+    return saida;
+  }
+
   static void esquecerAprendidos() => _esquecer();
 
   static String diagnostico() => _diagnostico().toDartString();
@@ -150,6 +178,13 @@ final class _SiAparelho extends Struct {
   external Array<Char> caminho;
 }
 
+final class _SiLeitura extends Struct {
+  @Int32()
+  external int aparelho;
+  @Array(512)
+  external Array<Char> texto;
+}
+
 final class _SiOrigem extends Struct {
   @Int32()
   external int tipo;
@@ -177,3 +212,7 @@ final _esquecer = _lib.lookupFunction<Void Function(), void Function()>('si_esqu
 final _diagnostico = _lib.lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
   'si_diagnostico',
 );
+final _proximaLeitura = _lib
+    .lookupFunction<Int32 Function(Pointer<_SiLeitura>), int Function(Pointer<_SiLeitura>)>(
+      'si_proxima_leitura',
+    );

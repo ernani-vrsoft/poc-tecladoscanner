@@ -11,6 +11,8 @@ sem cadastro e sem bloquear nada.
   4. comportamento: rajada rápida (média ≤ 35 ms) ou de ritmo constante
      (scanner lento) terminada em Enter — aprende e grava o VID:PID.
   Teclas injetadas (AnyDesk/RDP, sem aparelho físico) são sempre teclado.
+  Portas seriais (Windows: todas as COM; Linux: ttyUSB*/ttyACM*) são abertas
+  a 9600 8N1 e cada leitura (até CR/LF ou 100 ms sem dados) é SCANNER.
 - `app/` — Flutter. A cada tecla chama `ScannerInput.origemDa(evento)`.
 
 ## Rodar
@@ -36,8 +38,16 @@ Executáveis prontos: GitHub Actions → build → Artifacts.
 Aprendidos ficam em `~/.config/poc_teclado/aprendidos.txt` (Linux) ou
 `%APPDATA%\poc_teclado\aprendidos.txt` (Windows).
 
+## Scanner serial (COMx)
+
+A lib precisa abrir a porta. Se outro programa já a abriu (por exemplo um
+programa que "digita" a leitura no Bloco de Notas), o painel mostra a porta
+como "aberta por outro programa" e o aviso no topo: feche esse programa.
+Atenção: a POC abre **todas** as portas seriais livres, inclusive de pinpad
+ou balança; feche-a antes de usar esses equipamentos.
+
 ## Linux
 
 Permissão de leitura em `/dev/input`, uma vez por usuário:
-`sudo usermod -aG input $USER` e entrar de novo na sessão. Sem isso o app
-mostra o aviso no topo.
+`sudo usermod -aG input $USER` (e `dialout` para serial) e entrar de novo na
+sessão. Sem isso o app mostra o aviso no topo.

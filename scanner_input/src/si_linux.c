@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <termios.h>
 #include <sys/ioctl.h>
 #include <string.h>
 #include <time.h>
@@ -17,6 +18,7 @@
 
 #define MAX_FDS 64
 #define REVARRER_MS 2000  // procura aparelhos novos/removidos
+#define PAUSA_SERIAL_US 100000  // sem bytes por 100 ms fecha a leitura serial
 
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cond;
@@ -26,6 +28,8 @@ static int g_pipe[2] = {-1, -1};
 typedef struct {
   int fd;
   int id;
+  int serial;            // 1 = porta serial
+  int64_t ultimo_byte;   // serial: momento do último byte pendente (0 = nada)
   char caminho[64];
 } Fonte;
 static Fonte g_fontes[MAX_FDS];
@@ -74,7 +78,7 @@ static void varrer(void) {
 
   DIR* d = opendir("/dev/input");
   if (!d) return;
-  int negados = 0;
+  int negados = 0, negados_serial = 0;
   struct dirent* e;
   while ((e = readdir(d)) && g_n_fontes < MAX_FDS) {
     if (strncmp(e->d_name, "event", 5) != 0) continue;
@@ -101,10 +105,48 @@ static void varrer(void) {
     int ap = nucleo_aparelho_conectado(caminho, nome, id.vendor, id.product, 0);
     g_fontes[g_n_fontes].fd = fd;
     g_fontes[g_n_fontes].id = ap;
+    g_fontes[g_n_fontes].serial = 0;
     snprintf(g_fontes[g_n_fontes].caminho, sizeof g_fontes[0].caminho, "%s", caminho);
     g_n_fontes++;
   }
   closedir(d);
+
+  // Portas seriais USB (scanner em modo USB-COM ou adaptador RS-232)
+  d = opendir("/dev");
+  while (d && (e = readdir(d)) && g_n_fontes < MAX_FDS) {
+    if (strncmp(e->d_name, "ttyUSB", 6) != 0 && strncmp(e->d_name, "ttyACM", 6) != 0) continue;
+    char caminho[64];
+    snprintf(caminho, sizeof caminho, "/dev/%s", e->d_name);
+    int ja = 0;
+    for (int i = 0; i < g_n_fontes; i++)
+      if (strcmp(g_fontes[i].caminho, caminho) == 0) ja = 1;
+    if (ja) continue;
+    int fd = open(caminho, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+      if (errno == EACCES) negados_serial++;
+      continue;
+    }
+    struct termios t;
+    if (tcgetattr(fd, &t) == 0) {
+      cfmakeraw(&t);
+      cfsetispeed(&t, B9600);
+      cfsetospeed(&t, B9600);
+      t.c_cflag |= CLOCAL | CREAD;
+      tcsetattr(fd, TCSANOW, &t);
+    }
+    Fonte* f = &g_fontes[g_n_fontes++];
+    f->fd = fd;
+    f->serial = 1;
+    f->ultimo_byte = 0;
+    snprintf(f->caminho, sizeof f->caminho, "%s", caminho);
+    f->id = nucleo_porta(caminho, 0);
+  }
+  if (d) closedir(d);
+  if (negados_serial)
+    nucleo_diagnostico(
+        "Sem permissão em %d porta(s) serial(is). Rode: sudo usermod -aG dialout $USER "
+        "e entre de novo na sessão.",
+        negados_serial);
   if (negados)
     nucleo_diagnostico(
         "Sem permissão em %d aparelho(s) de /dev/input. Rode: sudo usermod -aG "
@@ -128,12 +170,27 @@ static void* laco(void* arg) {
       p[i + 1].fd = g_fontes[i].fd;
       p[i + 1].events = POLLIN;
     }
-    int n = poll(p, g_n_fontes + 1, REVARRER_MS);
+    int n = poll(p, g_n_fontes + 1, 50);
     if (n < 0 && errno != EINTR) break;
     if (p[0].revents) break;  // pedido de parada
     for (int i = g_n_fontes - 1; i >= 0; i--) {
       if (p[i + 1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
         fechar_fonte(i);
+        continue;
+      }
+      if (g_fontes[i].serial) {
+        Fonte* f = &g_fontes[i];
+        if (p[i + 1].revents & POLLIN) {
+          char buf[256];
+          ssize_t r;
+          while ((r = read(f->fd, buf, sizeof buf)) > 0) {
+            nucleo_bytes_serial(f->id, buf, (int)r);
+            f->ultimo_byte = plat_agora_us();
+          }
+        } else if (f->ultimo_byte && plat_agora_us() - f->ultimo_byte >= PAUSA_SERIAL_US) {
+          nucleo_pausa_serial(f->id);
+          f->ultimo_byte = 0;
+        }
         continue;
       }
       if (!(p[i + 1].revents & POLLIN)) continue;
